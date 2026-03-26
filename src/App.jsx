@@ -208,6 +208,17 @@ function TrashIcon({ size = 16 }) {
   );
 }
 
+function BookIcon({ size = 22 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+      <line x1="8" y1="7" x2="16" y2="7" />
+      <line x1="8" y1="11" x2="13" y2="11" />
+    </svg>
+  );
+}
+
 function HomeIcon({ size = 22 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -776,6 +787,82 @@ html, body, #root {
 .timetable-grid { user-select: none; -webkit-user-select: none; }
 .week-col { user-select: none; -webkit-user-select: none; }
 
+/* Day summary card */
+.day-summary {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+.day-summary-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.day-summary-stat .stat-value {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+}
+.day-summary-stat .stat-label {
+  font-size: 11px;
+  color: var(--text3);
+  font-weight: 500;
+}
+.day-summary-next {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.day-summary-next .next-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: blink 1.5s infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.day-summary-next .next-info {
+  flex: 1;
+  min-width: 0;
+}
+.day-summary-next .next-label {
+  font-size: 11px;
+  color: var(--text3);
+  font-weight: 500;
+}
+.day-summary-next .next-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.day-summary-next .next-time {
+  font-size: 12px;
+  color: var(--text2);
+  font-family: var(--font-display);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 /* Login screen */
 .login-screen {
   min-height: 100vh;
@@ -1103,12 +1190,30 @@ function MainApp({ user, onLogout }) {
     }));
   };
 
+  // Delete journal
+  const deleteJournal = (scheduleId) => {
+    setJournals(prev => {
+      const next = { ...prev };
+      delete next[scheduleId];
+      return next;
+    });
+  };
+
   // Save daily journal
   const saveDailyJournal = (dateKey, data) => {
     setDailyJournals(prev => ({
       ...prev,
       [dateKey]: data,
     }));
+  };
+
+  // Delete daily journal
+  const deleteDailyJournal = (dateKey) => {
+    setDailyJournals(prev => {
+      const next = { ...prev };
+      delete next[dateKey];
+      return next;
+    });
   };
 
   // Navigate date
@@ -1229,6 +1334,15 @@ function MainApp({ user, onLogout }) {
               onDeleteSchedule={deleteSchedule}
             />
           )}
+          {page === "records" && (
+            <RecordsPage
+              schedules={schedules}
+              journals={journals}
+              dailyJournals={dailyJournals}
+              onDeleteJournal={deleteJournal}
+              onDeleteDailyJournal={deleteDailyJournal}
+            />
+          )}
         </div>
 
         {/* Bottom Nav */}
@@ -1241,9 +1355,13 @@ function MainApp({ user, onLogout }) {
             <CalendarWeekIcon />
             <span>주간</span>
           </button>
+          <button className={`nav-item ${page === "records" ? "active" : ""}`} onClick={() => setPage("records")}>
+            <BookIcon />
+            <span>기록</span>
+          </button>
           <button className={`nav-item ${page === "register" ? "active" : ""}`} onClick={() => setPage("register")}>
             <PenIcon size={22} />
-            <span>스케줄 등록</span>
+            <span>스케줄</span>
           </button>
         </nav>
 
@@ -1290,6 +1408,11 @@ function MainApp({ user, onLogout }) {
             onEdit={() => {
               setShowViewJournal(false);
               setShowJournalModal(true);
+            }}
+            onDelete={() => {
+              deleteJournal(selectedSchedule.id);
+              setShowViewJournal(false);
+              setSelectedSchedule(null);
             }}
             onClose={() => { setShowViewJournal(false); setSelectedSchedule(null); }}
           />
@@ -1346,6 +1469,20 @@ function HomePage({ viewDate, dateStr, dayIndex, todaySchedules, journals, daily
   const isToday = formatDate(viewDate) === formatDate(new Date());
   const hasDailyJournal = !!dailyJournals[dateStr];
 
+  // Summary calculations
+  const totalCount = todaySchedules.length;
+  const journalCount = todaySchedules.filter(s => journals[s.id]).length;
+  const totalMinutes = todaySchedules.reduce((sum, s) => sum + (timeToMin(s.endH, s.endM) - timeToMin(s.startH, s.startM)), 0);
+  const totalHours = Math.floor(totalMinutes / 60);
+  const remainMin = totalMinutes % 60;
+
+  // Find next upcoming schedule (only for today)
+  const now = new Date();
+  const currentMin = now.getHours() * 60 + now.getMinutes();
+  const sortedScheds = [...todaySchedules].sort((a, b) => timeToMin(a.startH, a.startM) - timeToMin(b.startH, b.startM));
+  const nextSched = isToday ? sortedScheds.find(s => timeToMin(s.startH, s.startM) > currentMin) : null;
+  const currentSched = isToday ? sortedScheds.find(s => timeToMin(s.startH, s.startM) <= currentMin && timeToMin(s.endH, s.endM) > currentMin) : null;
+
   return (
     <>
       <div className="day-nav">
@@ -1353,6 +1490,51 @@ function HomePage({ viewDate, dateStr, dayIndex, todaySchedules, journals, daily
         <h2>{isToday ? "오늘 " : ""}{dayLabel}</h2>
         <button onClick={nextDay}><ChevronRight /></button>
       </div>
+
+      {/* Summary card */}
+      {totalCount > 0 && (
+        <div className="day-summary">
+          <div className="day-summary-stat">
+            <div className="stat-value" style={{ color: "var(--accent)" }}>{totalCount}</div>
+            <div className="stat-label">일정</div>
+          </div>
+          <div className="day-summary-stat">
+            <div className="stat-value" style={{ color: "var(--accent3)" }}>
+              {totalHours > 0 ? `${totalHours}h` : ""}{remainMin > 0 ? `${remainMin}m` : ""}{totalMinutes === 0 ? "0" : ""}
+            </div>
+            <div className="stat-label">총 시간</div>
+          </div>
+          <div className="day-summary-stat">
+            <div className="stat-value" style={{ color: journalCount > 0 ? "#2ED573" : "var(--text3)" }}>{journalCount}/{totalCount}</div>
+            <div className="stat-label">기록 완료</div>
+          </div>
+        </div>
+      )}
+
+      {/* Current / Next schedule indicator */}
+      {isToday && (currentSched || nextSched) && (
+        <div className="day-summary-next">
+          {currentSched ? (
+            <>
+              <div className="next-dot" style={{ background: getColor(currentSched.colorIdx || 0) }} />
+              <div className="next-info">
+                <div className="next-label">지금 진행 중</div>
+                <div className="next-title">{currentSched.title}</div>
+              </div>
+              <div className="next-time">{formatTime(currentSched.endH, currentSched.endM)}까지</div>
+            </>
+          ) : nextSched ? (
+            <>
+              <div className="next-dot" style={{ background: getColor(nextSched.colorIdx || 0) }} />
+              <div className="next-info">
+                <div className="next-label">다음 일정</div>
+                <div className="next-title">{nextSched.title}</div>
+              </div>
+              <div className="next-time">{formatTime(nextSched.startH, nextSched.startM)}</div>
+            </>
+          ) : null}
+        </div>
+      )}
 
       <DayTimetable
         schedules={todaySchedules}
@@ -1396,6 +1578,7 @@ function DayTimetable({ schedules, journals, dateStr, onScheduleClick, onDragCre
   const gridRef = useRef(null);
   const [dragState, setDragState] = useState(null); // { startMin, currentMin }
   const dragRef = useRef(null);
+  const longPressTimer = useRef(null);
 
   const DEFAULT_MIN_HOUR = 7;
   const DEFAULT_MAX_HOUR = 21;
@@ -1416,33 +1599,47 @@ function DayTimetable({ schedules, journals, dateStr, onScheduleClick, onDragCre
     const rect = gridRef.current.getBoundingClientRect();
     const y = clientY - rect.top;
     const rawMin = minHour * 60 + y / PX_PER_MIN;
-    // Snap to 5 min
     return Math.round(rawMin / 5) * 5;
   }, [minHour]);
 
   const handlePointerDown = (e) => {
     if (e.target.closest(".schedule-block")) return;
     const min = getMinFromY(e.clientY);
-    dragRef.current = { startMin: min, moved: false };
-    setDragState({ startMin: min, currentMin: min });
-    gridRef.current?.setPointerCapture(e.pointerId);
+    const pointerId = e.pointerId;
+    // Start long-press timer — drag mode activates after 300ms hold
+    longPressTimer.current = setTimeout(() => {
+      dragRef.current = { startMin: min, active: true };
+      setDragState({ startMin: min, currentMin: min });
+      try { gridRef.current?.setPointerCapture(pointerId); } catch {}
+    }, 300);
+    dragRef.current = { startMin: min, active: false };
   };
 
   const handlePointerMove = (e) => {
     if (!dragRef.current) return;
-    dragRef.current.moved = true;
+    if (!dragRef.current.active) {
+      // User moved before long-press fired → cancel, let scroll happen
+      clearTimeout(longPressTimer.current);
+      dragRef.current = null;
+      return;
+    }
     const min = getMinFromY(e.clientY);
     setDragState(prev => prev ? { ...prev, currentMin: min } : null);
   };
 
   const handlePointerUp = (e) => {
-    if (!dragRef.current) return;
-    const { startMin, moved } = dragRef.current;
+    clearTimeout(longPressTimer.current);
+    if (!dragRef.current || !dragRef.current.active) {
+      dragRef.current = null;
+      setDragState(null);
+      return;
+    }
+    const { startMin } = dragRef.current;
     const endMin = getMinFromY(e.clientY);
     dragRef.current = null;
     setDragState(null);
 
-    if (!moved || Math.abs(endMin - startMin) < 10) return;
+    if (Math.abs(endMin - startMin) < 10) return;
 
     const lo = Math.min(startMin, endMin);
     const hi = Math.max(startMin, endMin);
@@ -1451,6 +1648,12 @@ function DayTimetable({ schedules, journals, dateStr, onScheduleClick, onDragCre
     if (onDragCreate) {
       onDragCreate({ date: dateStr, startH: s.h, startM: s.m, endH: eT.h, endM: eT.m });
     }
+  };
+
+  const handlePointerCancel = () => {
+    clearTimeout(longPressTimer.current);
+    dragRef.current = null;
+    setDragState(null);
   };
 
   // Compute drag selection box
@@ -1477,11 +1680,12 @@ function DayTimetable({ schedules, journals, dateStr, onScheduleClick, onDragCre
       ))}
       <div
         className="timetable-grid"
-        style={{ height, touchAction: "none" }}
+        style={{ height, touchAction: dragState ? "none" : "auto" }}
         ref={gridRef}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
       >
         {schedules.map((s) => {
           const topMin = timeToMin(s.startH, s.startM) - minHour * 60;
@@ -1523,7 +1727,7 @@ function DayTimetable({ schedules, journals, dateStr, onScheduleClick, onDragCre
           position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
           color: "var(--text3)", fontSize: 13, textAlign: "center", pointerEvents: "none",
         }}>
-          드래그하여 스케줄을 추가하세요
+          꾹 눌러서 드래그하면 스케줄을 추가할 수 있어요
         </div>
       )}
     </div>
@@ -1534,6 +1738,7 @@ function DayTimetable({ schedules, journals, dateStr, onScheduleClick, onDragCre
 function WeekDayCol({ date, dateStr, dayScheds, minHour, maxHour, PX_PER_MIN, gridH, hours, journals, onScheduleClick, onDragCreate }) {
   const colRef = useRef(null);
   const dragRef = useRef(null);
+  const longPressTimer = useRef(null);
   const [dragState, setDragState] = useState(null);
 
   const getMinFromY = useCallback((clientY) => {
@@ -1547,27 +1752,45 @@ function WeekDayCol({ date, dateStr, dayScheds, minHour, maxHour, PX_PER_MIN, gr
   const handlePointerDown = (e) => {
     if (e.target.closest(".week-block")) return;
     const min = getMinFromY(e.clientY);
-    dragRef.current = { startMin: min, moved: false };
-    setDragState({ startMin: min, currentMin: min });
-    colRef.current?.setPointerCapture(e.pointerId);
+    const pointerId = e.pointerId;
+    longPressTimer.current = setTimeout(() => {
+      dragRef.current = { startMin: min, active: true };
+      setDragState({ startMin: min, currentMin: min });
+      try { colRef.current?.setPointerCapture(pointerId); } catch {}
+    }, 300);
+    dragRef.current = { startMin: min, active: false };
   };
   const handlePointerMove = (e) => {
     if (!dragRef.current) return;
-    dragRef.current.moved = true;
+    if (!dragRef.current.active) {
+      clearTimeout(longPressTimer.current);
+      dragRef.current = null;
+      return;
+    }
     setDragState(prev => prev ? { ...prev, currentMin: getMinFromY(e.clientY) } : null);
   };
   const handlePointerUp = (e) => {
-    if (!dragRef.current) return;
-    const { startMin, moved } = dragRef.current;
+    clearTimeout(longPressTimer.current);
+    if (!dragRef.current || !dragRef.current.active) {
+      dragRef.current = null;
+      setDragState(null);
+      return;
+    }
+    const { startMin } = dragRef.current;
     const endMin = getMinFromY(e.clientY);
     dragRef.current = null;
     setDragState(null);
-    if (!moved || Math.abs(endMin - startMin) < 10) return;
+    if (Math.abs(endMin - startMin) < 10) return;
     const lo = Math.min(startMin, endMin);
     const hi = Math.max(startMin, endMin);
     const s = minToTime(lo);
     const eT = minToTime(hi);
     if (onDragCreate) onDragCreate({ date: dateStr, startH: s.h, startM: s.m, endH: eT.h, endM: eT.m });
+  };
+  const handlePointerCancel = () => {
+    clearTimeout(longPressTimer.current);
+    dragRef.current = null;
+    setDragState(null);
   };
 
   let dragTop = 0, dragHeight = 0;
@@ -1582,10 +1805,11 @@ function WeekDayCol({ date, dateStr, dayScheds, minHour, maxHour, PX_PER_MIN, gr
     <div
       ref={colRef}
       className="week-col"
-      style={{ height: gridH, position: "relative", touchAction: "none" }}
+      style={{ height: gridH, position: "relative", touchAction: dragState ? "none" : "auto" }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
     >
       {hours.map(h => (
         <div key={h} style={{
@@ -1873,26 +2097,50 @@ function JournalModal({ schedule, existingJournal, onSave, onClose }) {
         if (base64url) setAudioURL(base64url);
         setUploading(false);
       };
-      mediaRec.start();
+      mediaRec.start(250);
       setIsRecording(true);
       setRecTime(0);
       timerRef.current = setInterval(() => setRecTime(p => p + 1), 1000);
 
+      // Speech recognition — runs alongside recording
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SpeechRecognition) {
         const recognition = new SpeechRecognition();
         recognition.lang = "ko-KR";
         recognition.continuous = true;
-        recognition.interimResults = false;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
+
+        let finalTranscript = "";
+
         recognition.onresult = (event) => {
-          let transcript = "";
-          for (let i = 0; i < event.results.length; i++) {
-            transcript += event.results[i][0].transcript;
+          let interim = "";
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const t = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscript += t + " ";
+            } else {
+              interim = t;
+            }
           }
-          setVoiceText(prev => prev + (prev ? " " : "") + transcript);
+          setVoiceText(finalTranscript + interim);
         };
-        recognition.start();
+
+        recognition.onerror = (e) => {
+          if (e.error === "no-speech" || e.error === "aborted") return;
+          console.warn("Speech recognition error:", e.error);
+        };
+
+        // Auto-restart if recognition ends while still recording
+        recognition.onend = () => {
+          if (mediaRecRef.current && mediaRecRef.current.state === "recording") {
+            try { recognition.start(); } catch {}
+          }
+        };
+
+        try { recognition.start(); } catch {}
         mediaRecRef.current._recognition = recognition;
+        mediaRecRef.current._getFinalTranscript = () => finalTranscript;
       }
     } catch (err) {
       alert("마이크 접근이 필요합니다. 브라우저 설정을 확인해주세요.");
@@ -1902,7 +2150,12 @@ function JournalModal({ schedule, existingJournal, onSave, onClose }) {
   const stopRecording = () => {
     if (mediaRecRef.current) {
       mediaRecRef.current.stop();
-      if (mediaRecRef.current._recognition) mediaRecRef.current._recognition.stop();
+      if (mediaRecRef.current._recognition) {
+        const finalText = mediaRecRef.current._getFinalTranscript?.() || "";
+        mediaRecRef.current._recognition.onend = null; // prevent auto-restart
+        mediaRecRef.current._recognition.stop();
+        if (finalText.trim()) setVoiceText(finalText.trim());
+      }
     }
     setIsRecording(false);
     clearInterval(timerRef.current);
@@ -1960,7 +2213,7 @@ function JournalModal({ schedule, existingJournal, onSave, onClose }) {
           {audioURL && (
             <div style={{ marginTop: 8 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <audio controls className="audio-player" src={audioURL} style={{ flex: 1 }} />
+                <SafeAudioPlayer src={audioURL} style={{ flex: 1 }} />
                 <button className="icon-btn" style={{ flexShrink: 0, width: 36, height: 36 }} title="다운로드" onClick={() => {
                   fetch(audioURL).then(r => r.blob()).then(blob => {
                     const u = URL.createObjectURL(blob);
@@ -1998,10 +2251,29 @@ function JournalModal({ schedule, existingJournal, onSave, onClose }) {
   );
 }
 
+// ─── Audio Player (fixes base64 playback bar issue) ───
+function SafeAudioPlayer({ src, style }) {
+  const [blobUrl, setBlobUrl] = useState(null);
+  useEffect(() => {
+    if (!src) return;
+    if (src.startsWith("data:")) {
+      fetch(src).then(r => r.blob()).then(blob => {
+        setBlobUrl(URL.createObjectURL(blob));
+      }).catch(() => setBlobUrl(src));
+    } else {
+      setBlobUrl(src);
+    }
+    return () => { if (blobUrl && blobUrl.startsWith("blob:")) URL.revokeObjectURL(blobUrl); };
+  }, [src]);
+  if (!blobUrl) return null;
+  return <audio controls preload="metadata" className="audio-player" src={blobUrl} style={style} />;
+}
+
 // ─── View Journal Modal ───
-function ViewJournalModal({ schedule, journal, onEdit, onClose }) {
+function ViewJournalModal({ schedule, journal, onEdit, onDelete, onClose }) {
   const hasVoice = journal.hasVoice || journal.type === "voice" || !!journal.audioURL;
   const hasText = journal.hasText || journal.type === "text" || !!journal.text;
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const handleDownloadAudio = async () => {
     if (!journal.audioURL) return;
@@ -2018,8 +2290,6 @@ function ViewJournalModal({ schedule, journal, onEdit, onClose }) {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (e) {
-      console.error("Download failed:", e);
-      // Fallback: open in new tab
       window.open(journal.audioURL, "_blank");
     }
   };
@@ -2047,7 +2317,7 @@ function ViewJournalModal({ schedule, journal, onEdit, onClose }) {
             </div>
             {journal.audioURL && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <audio controls className="audio-player" src={journal.audioURL} style={{ flex: 1, marginBottom: 0 }} />
+                <SafeAudioPlayer src={journal.audioURL} style={{ flex: 1, marginBottom: 0 }} />
                 <button onClick={handleDownloadAudio} className="icon-btn" style={{ flexShrink: 0, width: 36, height: 36 }} title="다운로드">
                   <DownloadIcon size={18} />
                 </button>
@@ -2076,9 +2346,16 @@ function ViewJournalModal({ schedule, journal, onEdit, onClose }) {
           </div>
         )}
 
-        <button className="btn btn-secondary btn-block" onClick={onEdit} style={{ marginTop: 12 }}>
-          수정하기
-        </button>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <button className="btn btn-secondary" onClick={onEdit} style={{ flex: 1 }}>수정하기</button>
+          {!confirmDelete ? (
+            <button className="btn btn-danger btn-sm" onClick={() => setConfirmDelete(true)} style={{ flexShrink: 0 }}>
+              <TrashIcon size={16} />
+            </button>
+          ) : (
+            <button className="btn btn-danger" onClick={onDelete} style={{ flexShrink: 0, fontSize: 13 }}>삭제 확인</button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -2111,7 +2388,7 @@ function DailyJournalModal({ dateStr, existingJournal, onSave, onClose }) {
         if (base64url) setAudioURL(base64url);
         setUploading(false);
       };
-      mediaRec.start();
+      mediaRec.start(250);
       setIsRecording(true);
       setRecTime(0);
       timerRef.current = setInterval(() => setRecTime(p => p + 1), 1000);
@@ -2121,16 +2398,38 @@ function DailyJournalModal({ dateStr, existingJournal, onSave, onClose }) {
         const recognition = new SpeechRecognition();
         recognition.lang = "ko-KR";
         recognition.continuous = true;
-        recognition.interimResults = false;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
+
+        let finalTranscript = "";
+
         recognition.onresult = (event) => {
-          let transcript = "";
-          for (let i = 0; i < event.results.length; i++) {
-            transcript += event.results[i][0].transcript;
+          let interim = "";
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const t = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscript += t + " ";
+            } else {
+              interim = t;
+            }
           }
-          setVoiceText(prev => prev + (prev ? " " : "") + transcript);
+          setVoiceText(finalTranscript + interim);
         };
-        recognition.start();
+
+        recognition.onerror = (e) => {
+          if (e.error === "no-speech" || e.error === "aborted") return;
+          console.warn("Speech recognition error:", e.error);
+        };
+
+        recognition.onend = () => {
+          if (mediaRecRef.current && mediaRecRef.current.state === "recording") {
+            try { recognition.start(); } catch {}
+          }
+        };
+
+        try { recognition.start(); } catch {}
         mediaRecRef.current._recognition = recognition;
+        mediaRecRef.current._getFinalTranscript = () => finalTranscript;
       }
     } catch (err) {
       alert("마이크 접근이 필요합니다.");
@@ -2140,7 +2439,12 @@ function DailyJournalModal({ dateStr, existingJournal, onSave, onClose }) {
   const stopRecording = () => {
     if (mediaRecRef.current) {
       mediaRecRef.current.stop();
-      if (mediaRecRef.current._recognition) mediaRecRef.current._recognition.stop();
+      if (mediaRecRef.current._recognition) {
+        const finalText = mediaRecRef.current._getFinalTranscript?.() || "";
+        mediaRecRef.current._recognition.onend = null;
+        mediaRecRef.current._recognition.stop();
+        if (finalText.trim()) setVoiceText(finalText.trim());
+      }
     }
     setIsRecording(false);
     clearInterval(timerRef.current);
@@ -2196,7 +2500,7 @@ function DailyJournalModal({ dateStr, existingJournal, onSave, onClose }) {
           {audioURL && (
             <div style={{ marginTop: 8 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <audio controls className="audio-player" src={audioURL} style={{ flex: 1 }} />
+                <SafeAudioPlayer src={audioURL} style={{ flex: 1 }} />
                 <button className="icon-btn" style={{ flexShrink: 0, width: 36, height: 36 }} title="다운로드" onClick={() => {
                   fetch(audioURL).then(r => r.blob()).then(blob => {
                     const u = URL.createObjectURL(blob);
@@ -2229,6 +2533,147 @@ function DailyJournalModal({ dateStr, existingJournal, onSave, onClose }) {
         <button className="btn btn-primary btn-block" onClick={handleSave} style={{ marginTop: 4 }} disabled={uploading}>{uploading ? "업로드 중..." : "저장하기"}</button>
       </div>
     </div>
+  );
+}
+
+// ─── Records Page (기록 탭) ───
+function RecordsPage({ schedules, journals, dailyJournals, onDeleteJournal, onDeleteDailyJournal }) {
+  const [expandedDate, setExpandedDate] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  // Collect all dates that have any journal entries
+  const dateMap = {}; // { "2026-03-26": { scheduleJournals: [...], dailyJournal: {...} } }
+
+  // Schedule journals — find the schedule for each journal entry
+  const allScheds = {};
+  Object.entries(schedules).forEach(([wk, items]) => {
+    items.forEach(s => { allScheds[s.id] = s; });
+  });
+
+  Object.entries(journals).forEach(([schedId, journal]) => {
+    const sched = allScheds[schedId];
+    if (!sched) return;
+    const d = sched.date;
+    if (!dateMap[d]) dateMap[d] = { scheduleJournals: [], dailyJournal: null };
+    dateMap[d].scheduleJournals.push({ schedId, sched, journal });
+  });
+
+  Object.entries(dailyJournals).forEach(([d, journal]) => {
+    if (!dateMap[d]) dateMap[d] = { scheduleJournals: [], dailyJournal: null };
+    dateMap[d].dailyJournal = journal;
+  });
+
+  const sortedDates = Object.keys(dateMap).sort((a, b) => b.localeCompare(a));
+
+  if (sortedDates.length === 0) {
+    return (
+      <div className="empty-state">
+        <div className="emoji">📭</div>
+        <p>아직 기록이 없어요.<br />스케줄에서 느낀점을 남겨보세요!</p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <h2 style={{ fontFamily: "var(--font-display)", fontSize: 22, marginBottom: 16 }}>📖 나의 기록</h2>
+      {sortedDates.map(dateStr => {
+        const d = parseDate(dateStr);
+        const dayIdx = d.getDay() === 0 ? 6 : d.getDay() - 1;
+        const label = `${d.getMonth() + 1}월 ${d.getDate()}일 (${DAYS_KR[dayIdx]})`;
+        const data = dateMap[dateStr];
+        const totalEntries = data.scheduleJournals.length + (data.dailyJournal ? 1 : 0);
+        const isExpanded = expandedDate === dateStr;
+
+        return (
+          <div key={dateStr} style={{ marginBottom: 10 }}>
+            <button onClick={() => setExpandedDate(isExpanded ? null : dateStr)} style={{
+              width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "12px 14px", background: "var(--card)", border: "none", borderRadius: "var(--radius-sm)",
+              boxShadow: "var(--shadow)", cursor: "pointer", fontFamily: "var(--font-body)",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text)" }}>{label}</span>
+                <span style={{ fontSize: 12, color: "var(--text3)", background: "var(--bg)", padding: "2px 8px", borderRadius: 10 }}>
+                  {totalEntries}건
+                </span>
+              </div>
+              <span style={{ color: "var(--text3)", transform: isExpanded ? "rotate(90deg)" : "rotate(0)", transition: "transform 0.2s" }}>
+                <ChevronRight size={18} />
+              </span>
+            </button>
+
+            {isExpanded && (
+              <div style={{ padding: "10px 0 4px 0" }}>
+                {/* Daily journal */}
+                {data.dailyJournal && (
+                  <div className="journal-entry" style={{ marginBottom: 10 }}>
+                    <div className="journal-entry-header">
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: "var(--accent2)" }}>✨ 오늘의 느낀점</span>
+                        <div style={{ display: "flex", gap: 3 }}>
+                          {(data.dailyJournal.hasVoice || data.dailyJournal.audioURL) && <MicIcon size={12} color="var(--accent)" />}
+                          {(data.dailyJournal.hasText || data.dailyJournal.text) && <TextIcon size={12} color="var(--accent3)" />}
+                        </div>
+                      </div>
+                      {confirmDeleteId === "daily_" + dateStr ? (
+                        <button onClick={() => { onDeleteDailyJournal(dateStr); setConfirmDeleteId(null); }}
+                          style={{ fontSize: 11, color: "#ff4757", background: "none", border: "none", cursor: "pointer", fontWeight: 700 }}>삭제 확인</button>
+                      ) : (
+                        <button onClick={() => setConfirmDeleteId("daily_" + dateStr)}
+                          style={{ color: "var(--text3)", background: "none", border: "none", cursor: "pointer" }}><TrashIcon size={14} /></button>
+                      )}
+                    </div>
+                    {data.dailyJournal.audioURL && (
+                      <SafeAudioPlayer src={data.dailyJournal.audioURL} style={{ marginBottom: 6 }} />
+                    )}
+                    {data.dailyJournal.voiceText && (
+                      <div className="journal-entry-text" style={{ fontSize: 13, marginBottom: 4, color: "var(--text2)" }}>🎙 {data.dailyJournal.voiceText}</div>
+                    )}
+                    {data.dailyJournal.text && (
+                      <div className="journal-entry-text" style={{ fontSize: 13 }}>{data.dailyJournal.text}</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Schedule journals */}
+                {data.scheduleJournals.map(({ schedId, sched, journal }) => (
+                  <div key={schedId} className="journal-entry" style={{ marginBottom: 10 }}>
+                    <div className="journal-entry-header">
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: getColor(sched.colorIdx || 0), flexShrink: 0 }} />
+                        <span style={{ fontSize: 13, fontWeight: 600 }}>{sched.title}</span>
+                        <span style={{ fontSize: 11, color: "var(--text3)" }}>{formatTime(sched.startH, sched.startM)}-{formatTime(sched.endH, sched.endM)}</span>
+                        <div style={{ display: "flex", gap: 3 }}>
+                          {(journal.hasVoice || journal.audioURL) && <MicIcon size={12} color="var(--accent)" />}
+                          {(journal.hasText || journal.text) && <TextIcon size={12} color="var(--accent3)" />}
+                        </div>
+                      </div>
+                      {confirmDeleteId === schedId ? (
+                        <button onClick={() => { onDeleteJournal(schedId); setConfirmDeleteId(null); }}
+                          style={{ fontSize: 11, color: "#ff4757", background: "none", border: "none", cursor: "pointer", fontWeight: 700 }}>삭제 확인</button>
+                      ) : (
+                        <button onClick={() => setConfirmDeleteId(schedId)}
+                          style={{ color: "var(--text3)", background: "none", border: "none", cursor: "pointer" }}><TrashIcon size={14} /></button>
+                      )}
+                    </div>
+                    {journal.audioURL && (
+                      <SafeAudioPlayer src={journal.audioURL} style={{ marginBottom: 6 }} />
+                    )}
+                    {journal.voiceText && (
+                      <div className="journal-entry-text" style={{ fontSize: 13, marginBottom: 4, color: "var(--text2)" }}>🎙 {journal.voiceText}</div>
+                    )}
+                    {journal.text && (
+                      <div className="journal-entry-text" style={{ fontSize: 13 }}>{journal.text}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
   );
 }
 
