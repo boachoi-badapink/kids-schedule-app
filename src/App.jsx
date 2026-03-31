@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { db, auth, googleProvider } from "./firebase.js";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, query, where, getDocs, updateDoc, arrayUnion, arrayRemove } from "firebase/firestore";
 import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
 
 // ─── Utility helpers ───
 const DAYS_KR = ["월", "화", "수", "목", "금", "토", "일"];
 const DAYS_FULL = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"];
-const HOURS = Array.from({ length: 15 }, (_, i) => i + 7); // 7~21
+const HOURS = Array.from({ length: 15 }, (_, i) => i + 7);
 
 function getMonday(d) {
   const date = new Date(d);
@@ -26,9 +26,7 @@ function parseDate(s) {
   return new Date(y, m - 1, d);
 }
 
-function isSunday(d) {
-  return d.getDay() === 0;
-}
+function isSunday(d) { return d.getDay() === 0; }
 
 function getWeekDates(monday) {
   return Array.from({ length: 7 }, (_, i) => {
@@ -38,15 +36,20 @@ function getWeekDates(monday) {
   });
 }
 
-function weekKey(monday) {
-  return formatDate(monday);
-}
-
+function weekKey(monday) { return formatDate(monday); }
 function timeToMin(h, m) { return h * 60 + m; }
 function minToTime(min) { return { h: Math.floor(min / 60), m: min % 60 }; }
 function formatTime(h, m) { return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`; }
-
 function generateId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+// ─── Audio format helper ───
+function getBestAudioMime() {
+  const preferred = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm", "audio/ogg", "audio/mp4"];
+  for (const mime of preferred) {
+    if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(mime)) return mime;
+  }
+  return "";
+}
 
 // ─── Storage Keys ───
 const STORAGE_KEYS = {
@@ -56,34 +59,46 @@ const STORAGE_KEYS = {
   dailyJournals: "dailyJournals",
 };
 
-// ─── Firebase Storage helpers ───
-let _currentUid = null;
-
-function setCurrentUid(uid) { _currentUid = uid; }
+// ─── Firebase helpers (space-aware) ───
+let _spaceId = null;
+function setSpaceId(id) { _spaceId = id; }
 
 async function cloudSave(key, data) {
-  if (!_currentUid) return;
+  if (!_spaceId) return;
   try {
-    await setDoc(doc(db, "users", _currentUid, "data", key), { value: JSON.stringify(data), updatedAt: new Date().toISOString() });
-  } catch (e) {
-    console.error("Firebase save failed:", e);
-  }
+    await setDoc(doc(db, "spaces", _spaceId, "data", key), { value: JSON.stringify(data), updatedAt: new Date().toISOString() });
+  } catch (e) { console.error("Firebase save failed:", e); }
 }
 
 async function cloudLoad(key) {
-  if (!_currentUid) return null;
+  if (!_spaceId) return null;
   try {
-    const snap = await getDoc(doc(db, "users", _currentUid, "data", key));
-    if (snap.exists()) {
-      return JSON.parse(snap.data().value);
-    }
-  } catch (e) {
-    console.error("Firebase load failed:", e);
-  }
+    const snap = await getDoc(doc(db, "spaces", _spaceId, "data", key));
+    if (snap.exists()) return JSON.parse(snap.data().value);
+  } catch (e) { console.error("Firebase load failed:", e); }
   return null;
 }
 
-// Convert audio blob to base64 data URL (stored in Firestore directly)
+// ─── IndexedDB for audio blobs (local cache) ───
+function openAudioDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("kidschedAudio", 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore("blobs"); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function saveAudioBlob(id, blob) {
+  try { const idb = await openAudioDB(); const tx = idb.transaction("blobs", "readwrite"); tx.objectStore("blobs").put(blob, id); await new Promise((r, j) => { tx.oncomplete = r; tx.onerror = j; }); } catch (e) { console.error("IDB save:", e); }
+}
+async function loadAudioBlob(id) {
+  try { const idb = await openAudioDB(); const tx = idb.transaction("blobs", "readonly"); const req = tx.objectStore("blobs").get(id); return new Promise(r => { req.onsuccess = () => r(req.result || null); req.onerror = () => r(null); }); } catch { return null; }
+}
+async function deleteAudioBlob(id) {
+  try { const idb = await openAudioDB(); const tx = idb.transaction("blobs", "readwrite"); tx.objectStore("blobs").delete(id); } catch {}
+}
+
+// Convert blob to base64 string
 function blobToBase64(blob) {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -91,6 +106,91 @@ function blobToBase64(blob) {
     reader.onerror = () => resolve(null);
     reader.readAsDataURL(blob);
   });
+}
+
+// Save audio: IDB locally + base64 in Firestore for cross-device sync
+async function saveAudioFull(id, blob) {
+  // Save to local IDB (fast playback)
+  await saveAudioBlob(id, blob);
+  // Save base64 to Firestore for cross-device access
+  if (_spaceId) {
+    try {
+      const base64 = await blobToBase64(blob);
+      if (base64 && base64.length < 900000) { // ~660KB blob limit for Firestore
+        await setDoc(doc(db, "spaces", _spaceId, "audio", id), { data: base64, createdAt: new Date().toISOString() });
+      } else {
+        console.warn("Audio too large for Firestore, saved locally only");
+      }
+    } catch (e) { console.warn("Audio Firestore save failed:", e); }
+  }
+}
+
+// Load audio: try IDB first, then Firestore
+async function loadAudioFull(id) {
+  // Try local IDB first (fast)
+  const local = await loadAudioBlob(id);
+  if (local) return local instanceof Blob ? local : new Blob([local], { type: "audio/webm" });
+  // Try Firestore (cross-device)
+  if (_spaceId) {
+    try {
+      const snap = await getDoc(doc(db, "spaces", _spaceId, "audio", id));
+      if (snap.exists()) {
+        const base64 = snap.data().data;
+        if (base64) {
+          const res = await fetch(base64);
+          const blob = await res.blob();
+          // Cache locally for next time
+          await saveAudioBlob(id, blob);
+          return blob;
+        }
+      }
+    } catch (e) { console.warn("Audio Firestore load failed:", e); }
+  }
+  return null;
+}
+
+// Delete audio from both stores
+async function deleteAudioFull(id) {
+  deleteAudioBlob(id);
+  if (_spaceId) {
+    try { const { deleteDoc: delDoc } = await import("firebase/firestore"); await delDoc(doc(db, "spaces", _spaceId, "audio", id)); } catch {}
+  }
+}
+
+// ─── Share / Space helpers ───
+function generateShareCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+async function createSpace(uid, displayName) {
+  const code = generateShareCode();
+  const spaceId = `space_${uid}`;
+  await setDoc(doc(db, "spaces", spaceId), { ownerId: uid, members: [uid], memberNames: { [uid]: displayName || "나" }, shareCode: code, createdAt: new Date().toISOString() });
+  return { spaceId, code };
+}
+async function findSpaceForUser(uid) {
+  const ownSnap = await getDoc(doc(db, "spaces", `space_${uid}`));
+  if (ownSnap.exists()) return { spaceId: `space_${uid}`, ...ownSnap.data() };
+  const q = query(collection(db, "spaces"), where("members", "array-contains", uid));
+  const snap = await getDocs(q);
+  if (!snap.empty) { const d = snap.docs[0]; return { spaceId: d.id, ...d.data() }; }
+  return null;
+}
+async function joinSpaceByCode(code, uid, displayName) {
+  const q = query(collection(db, "spaces"), where("shareCode", "==", code.toUpperCase()));
+  const snap = await getDocs(q);
+  if (snap.empty) return null;
+  const spaceDoc = snap.docs[0];
+  await updateDoc(doc(db, "spaces", spaceDoc.id), { members: arrayUnion(uid), [`memberNames.${uid}`]: displayName || "게스트" });
+  return { spaceId: spaceDoc.id, ...spaceDoc.data() };
+}
+async function leaveSpace(spaceId, uid) {
+  const spaceSnap = await getDoc(doc(db, "spaces", spaceId));
+  if (!spaceSnap.exists()) return;
+  if (spaceSnap.data().ownerId === uid) return;
+  await updateDoc(doc(db, "spaces", spaceId), { members: arrayRemove(uid) });
 }
 
 // ─── Icons (inline SVG) ───
@@ -992,16 +1092,32 @@ function GoogleIcon() {
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [spaceInfo, setSpaceInfo] = useState(null); // { spaceId, shareCode, members, memberNames, ownerId }
+  const [spaceLoading, setSpaceLoading] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
-      if (u) setCurrentUid(u.uid);
-      else setCurrentUid(null);
       setAuthLoading(false);
     });
     return unsub;
   }, []);
+
+  // Initialize space when user logs in
+  useEffect(() => {
+    if (!user) { setSpaceInfo(null); setSpaceId(null); return; }
+    (async () => {
+      setSpaceLoading(true);
+      let space = await findSpaceForUser(user.uid);
+      if (!space) {
+        const created = await createSpace(user.uid, user.displayName);
+        space = { spaceId: created.spaceId, shareCode: created.code, ownerId: user.uid, members: [user.uid], memberNames: { [user.uid]: user.displayName || "나" } };
+      }
+      setSpaceId(space.spaceId);
+      setSpaceInfo(space);
+      setSpaceLoading(false);
+    })();
+  }, [user]);
 
   const handleLogin = async () => {
     try {
@@ -1018,7 +1134,34 @@ export default function App() {
     await signOut(auth);
   };
 
-  if (authLoading) {
+  const handleJoinSpace = async (code) => {
+    if (!user) return false;
+    const space = await joinSpaceByCode(code, user.uid, user.displayName);
+    if (space) {
+      setSpaceId(space.spaceId);
+      setSpaceInfo(space);
+      return true;
+    }
+    return false;
+  };
+
+  const handleLeaveSpace = async () => {
+    if (!user || !spaceInfo) return;
+    await leaveSpace(spaceInfo.spaceId, user.uid);
+    // Create own space after leaving
+    const created = await createSpace(user.uid, user.displayName);
+    const space = { spaceId: created.spaceId, shareCode: created.code, ownerId: user.uid, members: [user.uid], memberNames: { [user.uid]: user.displayName || "나" } };
+    setSpaceId(space.spaceId);
+    setSpaceInfo(space);
+  };
+
+  const refreshSpaceInfo = async () => {
+    if (!user) return;
+    const space = await findSpaceForUser(user.uid);
+    if (space) setSpaceInfo(space);
+  };
+
+  if (authLoading || spaceLoading) {
     return (
       <>
         <style>{GLOBAL_CSS}</style>
@@ -1049,11 +1192,11 @@ export default function App() {
     );
   }
 
-  return <MainApp user={user} onLogout={handleLogout} />;
+  return <MainApp user={user} onLogout={handleLogout} spaceInfo={spaceInfo} onJoinSpace={handleJoinSpace} onLeaveSpace={handleLeaveSpace} onRefreshSpace={refreshSpaceInfo} />;
 }
 
 // ─── Main App (after login) ───
-function MainApp({ user, onLogout }) {
+function MainApp({ user, onLogout, spaceInfo, onJoinSpace, onLeaveSpace, onRefreshSpace }) {
   const [page, setPage] = useState("home");
   const [today, setToday] = useState(new Date());
   const [viewDate, setViewDate] = useState(new Date());
@@ -1067,8 +1210,9 @@ function MainApp({ user, onLogout }) {
   const [showNextWeekPopup, setShowNextWeekPopup] = useState(false);
   const [showDefaultSetup, setShowDefaultSetup] = useState(false);
   const [showViewJournal, setShowViewJournal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [editItem, setEditItem] = useState(null);
-  const [dragCreate, setDragCreate] = useState(null); // { date, startH, startM, endH, endM }
+  const [dragCreate, setDragCreate] = useState(null);
   const [selectedSchedule, setSelectedSchedule] = useState(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -1257,6 +1401,9 @@ function MainApp({ user, onLogout }) {
                   <div style={{ padding: "8px 16px", fontSize: 12, color: "var(--text3)", borderBottom: "1px solid var(--border)" }}>
                     {user.displayName || user.email}
                   </div>
+                  <button className="user-menu-item" onClick={() => { setShowUserMenu(false); setShowShareModal(true); }}>
+                    👥 공유하기
+                  </button>
                   <button className="user-menu-item danger" onClick={() => { setShowUserMenu(false); onLogout(); }}>
                     로그아웃
                   </button>
@@ -1457,6 +1604,46 @@ function MainApp({ user, onLogout }) {
               </div>
             </div>
           </div>
+        )}
+
+        {/* Share Modal */}
+        {showShareModal && (
+          <ShareModal
+            spaceInfo={spaceInfo}
+            user={user}
+            onJoin={async (code) => {
+              const space = await joinSpaceByCode(code, user.uid, user.displayName);
+              if (space) {
+                setSpaceId(space.spaceId);
+                setSpaceInfo(space);
+                // Reload data for new space
+                const [s, d, j, dj] = await Promise.all([
+                  cloudLoad(STORAGE_KEYS.schedules),
+                  cloudLoad(STORAGE_KEYS.defaults),
+                  cloudLoad(STORAGE_KEYS.journals),
+                  cloudLoad(STORAGE_KEYS.dailyJournals),
+                ]);
+                if (s) setSchedules(s);
+                if (d) setDefaults(d);
+                if (j) setJournals(j);
+                if (dj) setDailyJournals(dj);
+                return true;
+              }
+              return false;
+            }}
+            onLeave={async () => {
+              await leaveSpace(spaceInfo.spaceId, user.uid);
+              // Create own space
+              const created = await createSpace(user.uid, user.displayName);
+              setSpaceId(created.spaceId);
+              setSpaceInfo({ spaceId: created.spaceId, shareCode: created.code, ownerId: user.uid, members: [user.uid], memberNames: { [user.uid]: user.displayName || "나" } });
+              setSchedules({});
+              setDefaults([]);
+              setJournals({});
+              setDailyJournals({});
+            }}
+            onClose={() => setShowShareModal(false)}
+          />
         )}
       </div>
     </>
@@ -2085,19 +2272,22 @@ function JournalModal({ schedule, existingJournal, onSave, onClose }) {
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRec = new MediaRecorder(stream);
+      const mimeType = getBestAudioMime();
+      const mediaRec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       mediaRecRef.current = mediaRec;
       chunksRef.current = [];
       mediaRec.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
       mediaRec.onstop = async () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const recMime = mediaRec.mimeType || mimeType || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: recMime });
         stream.getTracks().forEach(t => t.stop());
         setUploading(true);
-        const base64url = await blobToBase64(blob);
-        if (base64url) setAudioURL(base64url);
+        const audioId = "audio_" + generateId();
+        await saveAudioFull(audioId, blob);
+        setAudioURL(audioId);
         setUploading(false);
       };
-      mediaRec.start(250);
+      mediaRec.start(1000);
       setIsRecording(true);
       setRecTime(0);
       timerRef.current = setInterval(() => setRecTime(p => p + 1), 1000);
@@ -2161,7 +2351,7 @@ function JournalModal({ schedule, existingJournal, onSave, onClose }) {
     clearInterval(timerRef.current);
   };
 
-  const removeAudio = () => { setAudioURL(null); setVoiceText(""); };
+  const removeAudio = () => { if (audioURL && audioURL.startsWith("audio_")) deleteAudioFull(audioURL); setAudioURL(null); setVoiceText(""); };
 
   const handleSave = () => {
     if (!text.trim() && !audioURL && !voiceText.trim()) return;
@@ -2251,22 +2441,86 @@ function JournalModal({ schedule, existingJournal, onSave, onClose }) {
   );
 }
 
-// ─── Audio Player (fixes base64 playback bar issue) ───
+// ─── Audio Player (robust playback: IDB → Firestore → direct URL) ───
 function SafeAudioPlayer({ src, style }) {
+  const audioRef = useRef(null);
   const [blobUrl, setBlobUrl] = useState(null);
+  const [error, setError] = useState(false);
+  const [ready, setReady] = useState(false);
+
   useEffect(() => {
-    if (!src) return;
-    if (src.startsWith("data:")) {
-      fetch(src).then(r => r.blob()).then(blob => {
-        setBlobUrl(URL.createObjectURL(blob));
-      }).catch(() => setBlobUrl(src));
-    } else {
-      setBlobUrl(src);
-    }
-    return () => { if (blobUrl && blobUrl.startsWith("blob:")) URL.revokeObjectURL(blobUrl); };
+    let url = null;
+    let cancelled = false;
+    setError(false);
+    setBlobUrl(null);
+    setReady(false);
+
+    (async () => {
+      if (!src) return;
+      try {
+        let blob = null;
+        if (src.startsWith("audio_")) {
+          // Load from IDB first, then Firestore
+          blob = await loadAudioFull(src);
+          if (cancelled) return;
+          if (!blob) { setError(true); return; }
+        } else if (src.startsWith("data:")) {
+          const r = await fetch(src);
+          if (cancelled) return;
+          blob = await r.blob();
+        } else if (src.startsWith("blob:")) {
+          setBlobUrl(src); return;
+        } else {
+          setBlobUrl(src); return;
+        }
+        if (blob && !cancelled) {
+          url = URL.createObjectURL(blob);
+          setBlobUrl(url);
+        }
+      } catch {
+        if (!cancelled) setError(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
   }, [src]);
-  if (!blobUrl) return null;
-  return <audio controls preload="metadata" className="audio-player" src={blobUrl} style={style} />;
+
+  // Fix WebM duration bug: Chrome doesn't know duration until end is reached
+  const handleLoadedMetadata = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (!isFinite(el.duration) || el.duration === 0) {
+      // Seek to a very large time to force browser to calculate duration
+      el.currentTime = Number.MAX_SAFE_INTEGER;
+      const onSeek = () => {
+        el.removeEventListener("timeupdate", onSeek);
+        el.currentTime = 0;
+        setReady(true);
+      };
+      el.addEventListener("timeupdate", onSeek);
+    } else {
+      setReady(true);
+    }
+  };
+
+  if (error) return <div style={{ padding: 8, fontSize: 12, color: "var(--accent)", ...style }}>음성 파일을 불러올 수 없습니다</div>;
+  if (!blobUrl) return <div style={{ padding: 8, fontSize: 12, color: "var(--text3)", ...style }}>음성 로딩 중...</div>;
+
+  return (
+    <audio
+      ref={audioRef}
+      controls
+      preload="auto"
+      className="audio-player"
+      src={blobUrl}
+      style={{ ...style, opacity: ready ? 1 : 0.5 }}
+      onLoadedMetadata={handleLoadedMetadata}
+      onCanPlay={() => setReady(true)}
+    />
+  );
 }
 
 // ─── View Journal Modal ───
@@ -2376,19 +2630,22 @@ function DailyJournalModal({ dateStr, existingJournal, onSave, onClose }) {
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRec = new MediaRecorder(stream);
+      const mimeType = getBestAudioMime();
+      const mediaRec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       mediaRecRef.current = mediaRec;
       chunksRef.current = [];
       mediaRec.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
       mediaRec.onstop = async () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const recMime = mediaRec.mimeType || mimeType || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: recMime });
         stream.getTracks().forEach(t => t.stop());
         setUploading(true);
-        const base64url = await blobToBase64(blob);
-        if (base64url) setAudioURL(base64url);
+        const audioId = "audio_" + generateId();
+        await saveAudioFull(audioId, blob);
+        setAudioURL(audioId);
         setUploading(false);
       };
-      mediaRec.start(250);
+      mediaRec.start(1000);
       setIsRecording(true);
       setRecTime(0);
       timerRef.current = setInterval(() => setRecTime(p => p + 1), 1000);
@@ -2450,7 +2707,7 @@ function DailyJournalModal({ dateStr, existingJournal, onSave, onClose }) {
     clearInterval(timerRef.current);
   };
 
-  const removeAudio = () => { setAudioURL(null); setVoiceText(""); };
+  const removeAudio = () => { if (audioURL && audioURL.startsWith("audio_")) deleteAudioFull(audioURL); setAudioURL(null); setVoiceText(""); };
 
   const handleSave = () => {
     if (!text.trim() && !audioURL && !voiceText.trim()) return;
@@ -2674,6 +2931,125 @@ function RecordsPage({ schedules, journals, dailyJournals, onDeleteJournal, onDe
         );
       })}
     </>
+  );
+}
+
+// ─── Share Modal ───
+function ShareModal({ spaceInfo, user, onJoin, onLeave, onClose }) {
+  const [joinCode, setJoinCode] = useState("");
+  const [joinError, setJoinError] = useState("");
+  const [joining, setJoining] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const isOwner = spaceInfo?.ownerId === user.uid;
+  const memberCount = spaceInfo?.members?.length || 1;
+
+  const handleCopy = () => {
+    if (!spaceInfo?.shareCode) return;
+    navigator.clipboard.writeText(spaceInfo.shareCode).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+
+  const handleJoin = async () => {
+    if (joinCode.trim().length < 6) { setJoinError("6자리 코드를 입력해주세요"); return; }
+    setJoining(true);
+    setJoinError("");
+    const ok = await onJoin(joinCode.trim());
+    setJoining(false);
+    if (!ok) setJoinError("잘못된 코드이거나 존재하지 않는 공유 코드입니다");
+    else onClose();
+  };
+
+  return (
+    <div className="modal-overlay modal-center" onClick={onClose}>
+      <div className="modal" style={{ borderRadius: "var(--radius)" }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h3>👥 공유하기</h3>
+          <button className="icon-btn" onClick={onClose}><CloseIcon /></button>
+        </div>
+
+        {/* My share code */}
+        {isOwner && spaceInfo?.shareCode && (
+          <div style={{ background: "var(--bg)", borderRadius: "var(--radius-sm)", padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 8 }}>나의 공유 코드</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{
+                flex: 1, background: "var(--card)", border: "2px dashed var(--accent)",
+                borderRadius: "var(--radius-sm)", padding: "12px 16px",
+                fontFamily: "var(--font-display)", fontSize: 28, fontWeight: 700,
+                letterSpacing: 6, textAlign: "center", color: "var(--accent)",
+              }}>
+                {spaceInfo.shareCode}
+              </div>
+              <button className="btn btn-primary btn-sm" onClick={handleCopy} style={{ whiteSpace: "nowrap" }}>
+                {copied ? "복사됨!" : "복사"}
+              </button>
+            </div>
+            <p style={{ fontSize: 12, color: "var(--text3)", marginTop: 8, lineHeight: 1.5 }}>
+              이 코드를 가족이나 친구에게 보내주세요.<br />
+              상대방이 이 코드를 입력하면 같은 스케줄과 기록을 함께 볼 수 있어요.
+            </p>
+          </div>
+        )}
+
+        {/* Members */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 8 }}>
+            현재 멤버 ({memberCount}명)
+          </div>
+          {spaceInfo?.memberNames && Object.entries(spaceInfo.memberNames).map(([uid, name]) => (
+            <div key={uid} style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "8px 12px", background: "var(--bg)", borderRadius: "var(--radius-sm)", marginBottom: 4,
+            }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: "50%", background: uid === spaceInfo.ownerId ? "var(--accent)" : "var(--accent3)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "#fff", fontSize: 12, fontWeight: 700,
+              }}>
+                {(name || "?")[0]}
+              </div>
+              <span style={{ fontSize: 14, fontWeight: 500 }}>{name}</span>
+              {uid === spaceInfo.ownerId && (
+                <span style={{ fontSize: 10, color: "var(--accent)", background: "#FFF0F0", padding: "2px 6px", borderRadius: 6, fontWeight: 600 }}>방장</span>
+              )}
+              {uid === user.uid && (
+                <span style={{ fontSize: 10, color: "var(--text3)" }}>나</span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Join another space */}
+        {isOwner && memberCount <= 1 && (
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+            <div style={{ fontSize: 13, color: "var(--text2)", marginBottom: 8 }}>다른 사람의 공유에 참여하기</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                className="form-input"
+                value={joinCode}
+                onChange={e => setJoinCode(e.target.value.toUpperCase())}
+                placeholder="6자리 코드 입력"
+                maxLength={6}
+                style={{ letterSpacing: 4, textAlign: "center", fontWeight: 700, fontSize: 18 }}
+              />
+              <button className="btn btn-primary btn-sm" onClick={handleJoin} disabled={joining} style={{ whiteSpace: "nowrap" }}>
+                {joining ? "..." : "참여"}
+              </button>
+            </div>
+            {joinError && <p style={{ fontSize: 12, color: "var(--accent)", marginTop: 6 }}>{joinError}</p>}
+          </div>
+        )}
+
+        {/* Leave space (non-owner) */}
+        {!isOwner && (
+          <button className="btn btn-danger btn-block btn-sm" onClick={() => { onLeave(); onClose(); }} style={{ marginTop: 8 }}>
+            공유 나가기
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
